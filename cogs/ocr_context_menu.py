@@ -30,23 +30,31 @@ class OCRResultView(discord.ui.View):
         self.translator = translator
         # 数式モード時は最初からMarkdown表示を有効化
         self.show_markdown = use_math
-        self.translated_cache: dict[int, str] = {}
+        self.translated_cache: dict[tuple[int, bool], str] = {}
         self.show_translation = False
 
     def format_content(self) -> str:
         blocks = []
         for r in self.results:
-            body = r.markdown_text if self.show_markdown else r.plain_text
+            if self.show_translation:
+                body = self.translated_cache.get((r.page_number, self.show_markdown), "")
+            else:
+                body = r.markdown_text if self.show_markdown else r.plain_text
+
             if not body:
                 body = "（テキストが検出されませんでした）"
             header = f"--- Page {r.page_number} ({r.total_ms:.0f}ms | conf: {r.avg_confidence:.1%}) ---"
-            section = f"{header}\n{body}"
-
-            if self.show_translation and r.page_number in self.translated_cache:
-                section += f"\n\n[🇯🇵 日本語訳]\n{self.translated_cache[r.page_number]}"
-
-            blocks.append(section)
+            blocks.append(f"{header}\n{body}")
         return "\n\n".join(blocks)
+
+    async def _ensure_translations(self) -> None:
+        for r in self.results:
+            key = (r.page_number, self.show_markdown)
+            if key not in self.translated_cache:
+                src = r.markdown_text if self.show_markdown else r.plain_text
+                self.translated_cache[key] = (
+                    await self.translator.translate_to_japanese(src) if src else ""
+                )
 
     async def _update_message(self, interaction: discord.Interaction):
         content = self.format_content()
@@ -68,20 +76,30 @@ class OCRResultView(discord.ui.View):
     @discord.ui.button(label="🌐 日本語に翻訳", style=discord.ButtonStyle.success)
     async def translate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        if not self.translated_cache:
-            for r in self.results:
-                src = r.markdown_text if self.show_markdown else r.plain_text
-                if src:
-                    self.translated_cache[r.page_number] = await self.translator.translate_to_japanese(src)
+        if not self.show_translation:
+            try:
+                await self._ensure_translations()
+            except Exception as exc:
+                logger.exception("Translation failed: %s", exc)
+                await interaction.followup.send(
+                    f"⚠️ 翻訳処理中にエラーが発生しました: `{type(exc).__name__}`",
+                    ephemeral=True,
+                )
+                return
 
         self.show_translation = not self.show_translation
-        button.label = "🔤 原文のみ表示" if self.show_translation else "🌐 日本語に翻訳"
+        button.label = "🔤 原文を表示" if self.show_translation else "🌐 日本語に翻訳"
         await self._update_message(interaction)
 
     @discord.ui.button(label="📄 Markdown/テキスト切替", style=discord.ButtonStyle.secondary)
     async def toggle_format(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         self.show_markdown = not self.show_markdown
+        if self.show_translation:
+            try:
+                await self._ensure_translations()
+            except Exception as exc:
+                logger.exception("Translation failed on format toggle: %s", exc)
         await self._update_message(interaction)
 
     @discord.ui.button(label="📢 チャンネルに共有", style=discord.ButtonStyle.primary)

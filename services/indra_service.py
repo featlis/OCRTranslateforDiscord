@@ -1,8 +1,42 @@
 from dataclasses import dataclass
 from pathlib import Path
 import asyncio
+import io
 import logging
 import threading
+
+# Windows環境で indra_ocr が math_meta.json や meta.json を cp932 で読み込んで UnicodeDecodeError になる問題を防止
+_orig_read_text = Path.read_text
+
+
+def _safe_read_text(self, encoding=None, errors=None):
+    if encoding is None:
+        encoding = "utf-8"
+    return _orig_read_text(self, encoding=encoding, errors=errors)
+
+
+Path.read_text = _safe_read_text
+
+_orig_io_open = io.open
+
+
+def _safe_io_open(file, mode="r", buffering=-1, encoding=None, errors=None, newline=None, closefd=True, opener=None):
+    if "b" not in mode and encoding is None:
+        encoding = "utf-8"
+    return _orig_io_open(
+        file,
+        mode=mode,
+        buffering=buffering,
+        encoding=encoding,
+        errors=errors,
+        newline=newline,
+        closefd=closefd,
+        opener=opener,
+    )
+
+
+io.open = _safe_io_open
+
 import indra_ocr
 
 logger = logging.getLogger(__name__)
@@ -57,11 +91,14 @@ class IndraOCRService:
                 avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
                 total_ms = page.timings.get("total_ms", 0.0) if page.timings else 0.0
 
+                plain = (page.text or "").strip()
+                md = (page.markdown if page.markdown is not None else plain).strip()
+
                 results.append(
                     PageOCRResult(
                         page_number=idx + 1,
-                        plain_text=page.text.strip(),
-                        markdown_text=page.markdown.strip(),
+                        plain_text=plain,
+                        markdown_text=md,
                         source_type=page.source,
                         total_ms=total_ms,
                         avg_confidence=avg_conf,
